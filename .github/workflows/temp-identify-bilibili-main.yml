@@ -1,14 +1,14 @@
 name: Temp identify Bilibili outro music
 
 on:
-  push:
+  pull_request:
     branches:
       - main
     paths:
-      - .github/workflows/temp-identify-bilibili-main.yml
+      - .github/music-identify-trigger
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   identify:
@@ -57,32 +57,24 @@ jobs:
                   if method is None:
                       continue
                   try:
-                      response = await method(path)
-                      return {'file': path, 'response': response}
+                      return {'file': path, 'response': await method(path)}
                   except Exception as exc:
                       errors.append(repr(exc))
               return {'file': path, 'errors': errors}
 
           async def main():
               shazam = Shazam()
-              results = []
-              for path in sorted(glob.glob('clips/*.wav')):
-                  results.append(await recognize_file(shazam, path))
-
-              metadata = {}
+              results = [await recognize_file(shazam, p) for p in sorted(glob.glob('clips/*.wav'))]
               info_files = glob.glob('source.info.json') + glob.glob('source.*.info.json')
+              metadata = {}
               if info_files:
-                  try:
-                      with open(info_files[0], 'r', encoding='utf-8') as f:
-                          raw = json.load(f)
-                      metadata = {k: raw.get(k) for k in ['id','title','description','duration','uploader','track','artist','creator','webpage_url']}
-                  except Exception as exc:
-                      metadata = {'error': repr(exc)}
+                  with open(info_files[0], 'r', encoding='utf-8') as f:
+                      raw = json.load(f)
+                  metadata = {k: raw.get(k) for k in ['id','title','description','duration','uploader','track','artist','creator','webpage_url']}
 
               candidates = []
               for item in results:
-                  response = item.get('response') or {}
-                  track = response.get('track') or {}
+                  track = (item.get('response') or {}).get('track') or {}
                   if track:
                       candidates.append({
                           'clip': item['file'],
@@ -99,19 +91,22 @@ jobs:
                   'candidates': candidates,
                   'all_recognition_results': results,
               }
-              with open('music-result-main.json', 'w', encoding='utf-8') as f:
+              with open('music-result.json', 'w', encoding='utf-8') as f:
                   json.dump(output, f, ensure_ascii=False, indent=2)
-              print(json.dumps({'candidates': candidates, 'metadata': metadata}, ensure_ascii=False, indent=2))
+              print('MUSIC_RESULT_START')
+              print(json.dumps(output, ensure_ascii=False, indent=2))
+              print('MUSIC_RESULT_END')
 
           asyncio.run(main())
           PY
 
           python identify.py
 
-      - name: Commit result
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add music-result-main.json
-          git commit -m 'temp: add music recognition result'
-          git push origin HEAD:main
+      - name: Upload result and clips
+        uses: actions/upload-artifact@v4
+        with:
+          name: music-result
+          path: |
+            music-result.json
+            clips/*.wav
+          retention-days: 1
