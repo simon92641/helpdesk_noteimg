@@ -1,0 +1,117 @@
+name: Temp identify Bilibili outro music
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/temp-identify-bilibili-main.yml
+
+permissions:
+  contents: write
+
+jobs:
+  identify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install yt-dlp shazamio requests
+
+      - name: Download and identify
+        shell: bash
+        run: |
+          set -euo pipefail
+          VIDEO_URL='https://www.bilibili.com/video/BV1bRgh6AEdB'
+          yt-dlp --no-playlist --no-progress --write-info-json -f 'bestaudio/best' -o 'source.%(ext)s' "$VIDEO_URL"
+          SRC=$(find . -maxdepth 1 -type f -name 'source.*' ! -name '*.json' | head -n 1)
+          test -n "$SRC"
+
+          mkdir -p clips
+          ffmpeg -hide_banner -loglevel error -y -sseof -45 -i "$SRC" -vn -ac 1 -ar 44100 clips/tail45.wav
+          ffmpeg -hide_banner -loglevel error -y -sseof -30 -i "$SRC" -vn -ac 1 -ar 44100 clips/tail30.wav
+          ffmpeg -hide_banner -loglevel error -y -sseof -20 -i "$SRC" -vn -ac 1 -ar 44100 clips/tail20.wav
+          ffmpeg -hide_banner -loglevel error -y -sseof -15 -i "$SRC" -vn -ac 1 -ar 44100 clips/tail15.wav
+          ffmpeg -hide_banner -loglevel error -y -sseof -12 -i "$SRC" -vn -ac 1 -ar 44100 clips/tail12.wav
+
+          cat > identify.py <<'PY'
+          import asyncio
+          import glob
+          import json
+          from shazamio import Shazam
+
+          async def recognize_file(shazam, path):
+              methods = [getattr(shazam, 'recognize', None), getattr(shazam, 'recognize_song', None)]
+              errors = []
+              for method in methods:
+                  if method is None:
+                      continue
+                  try:
+                      response = await method(path)
+                      return {'file': path, 'response': response}
+                  except Exception as exc:
+                      errors.append(repr(exc))
+              return {'file': path, 'errors': errors}
+
+          async def main():
+              shazam = Shazam()
+              results = []
+              for path in sorted(glob.glob('clips/*.wav')):
+                  results.append(await recognize_file(shazam, path))
+
+              metadata = {}
+              info_files = glob.glob('source.info.json') + glob.glob('source.*.info.json')
+              if info_files:
+                  try:
+                      with open(info_files[0], 'r', encoding='utf-8') as f:
+                          raw = json.load(f)
+                      metadata = {k: raw.get(k) for k in ['id','title','description','duration','uploader','track','artist','creator','webpage_url']}
+                  except Exception as exc:
+                      metadata = {'error': repr(exc)}
+
+              candidates = []
+              for item in results:
+                  response = item.get('response') or {}
+                  track = response.get('track') or {}
+                  if track:
+                      candidates.append({
+                          'clip': item['file'],
+                          'title': track.get('title'),
+                          'artist': track.get('subtitle'),
+                          'shazam_url': track.get('url'),
+                          'isrc': track.get('isrc'),
+                          'genres': track.get('genres'),
+                      })
+
+              output = {
+                  'video': 'BV1bRgh6AEdB',
+                  'metadata': metadata,
+                  'candidates': candidates,
+                  'all_recognition_results': results,
+              }
+              with open('music-result-main.json', 'w', encoding='utf-8') as f:
+                  json.dump(output, f, ensure_ascii=False, indent=2)
+              print(json.dumps({'candidates': candidates, 'metadata': metadata}, ensure_ascii=False, indent=2))
+
+          asyncio.run(main())
+          PY
+
+          python identify.py
+
+      - name: Commit result
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add music-result-main.json
+          git commit -m 'temp: add music recognition result'
+          git push origin HEAD:main
